@@ -13,18 +13,18 @@ app.use(helmet());
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// Rate Limiting
+// Trust proxy for Render
+app.set('trust proxy', 1);
+
+// Rate Limiting - Fixed for Render
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100 // limit each IP to 100 requests per windowMs
+  max: 100,
+  keyGenerator: (req) => {
+    return req.ip; // Use IP directly to avoid proxy issues
+  }
 });
 app.use('/api/', generalLimiter);
-
-const activationLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 hour
-  max: 5 // 5 activation attempts per hour
-});
-app.use('/api/activate-license', activationLimiter);
 
 // Environment variables
 const PORT = process.env.PORT || 3000;
@@ -395,55 +395,224 @@ app.get('/api/health', async (req, res) => {
   }
 });
 
+// Root route - Friendly homepage
+app.get('/', (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Babylon RCT License Server</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 40px; text-align: center; }
+            .container { max-width: 800px; margin: 0 auto; }
+            .endpoint { background: #f5f5f5; padding: 10px; margin: 10px 0; border-left: 4px solid #007cba; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🚀 Babylon RCT License Server</h1>
+            <p>Your license validation server is running successfully!</p>
+            
+            <h2>Available Endpoints:</h2>
+            
+            <div class="endpoint">
+                <strong>GET /api/health</strong> - Server health check
+                <br><a href="/api/health">Test Health</a>
+            </div>
+            
+            <div class="endpoint">
+                <strong>GET /admin</strong> - License management panel
+                <br><a href="/admin">Admin Panel</a>
+            </div>
+            
+            <div class="endpoint">
+                <strong>POST /api/validate-license</strong> - Validate license key
+            </div>
+            
+            <div class="endpoint">
+                <strong>POST /api/activate-license</strong> - Activate license on device
+            </div>
+            
+            <h3>Server Information:</h3>
+            <p><strong>Status:</strong> ✅ Live</p>
+            <p><strong>URL:</strong> https://babylon-license-server-zivj.onrender.com</p>
+            <p><strong>Database:</strong> MongoDB Atlas</p>
+        </div>
+    </body>
+    </html>
+  `);
+});
+
 // Serve admin panel
 app.get('/admin', (req, res) => {
+  const adminToken = process.env.ADMIN_TOKEN;
+  
   res.send(`
     <!DOCTYPE html>
     <html>
     <head>
         <title>Babylon RCT - License Admin</title>
         <style>
-            body { font-family: Arial, sans-serif; margin: 40px; }
-            .section { margin: 20px 0; padding: 20px; border: 1px solid #ddd; }
-            input, button { margin: 5px; padding: 10px; }
-            .success { background: #d4edda; padding: 10px; }
-            .error { background: #f8d7da; padding: 10px; }
+            body { 
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+                margin: 0; 
+                padding: 20px; 
+                background: #f5f6fa;
+                min-height: 100vh;
+            }
+            .container {
+                max-width: 500px;
+                margin: 0 auto;
+                background: white;
+                padding: 30px;
+                border-radius: 10px;
+                box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+            }
+            h1 { 
+                color: #2c3e50; 
+                text-align: center;
+                margin-bottom: 30px;
+            }
+            .form-group { 
+                margin-bottom: 20px; 
+            }
+            label { 
+                display: block; 
+                margin-bottom: 8px; 
+                font-weight: 600;
+                color: #555;
+            }
+            input { 
+                width: 100%; 
+                padding: 12px; 
+                border: 2px solid #ddd; 
+                border-radius: 6px;
+                font-size: 16px;
+                box-sizing: border-box;
+            }
+            input:focus {
+                border-color: #3498db;
+                outline: none;
+            }
+            button { 
+                background: #3498db;
+                color: white;
+                border: none;
+                padding: 15px;
+                border-radius: 6px;
+                cursor: pointer;
+                font-size: 16px;
+                font-weight: 600;
+                width: 100%;
+            }
+            button:hover { 
+                background: #2980b9;
+            }
+            button:disabled {
+                background: #bdc3c7;
+                cursor: not-allowed;
+            }
+            .result { 
+                margin-top: 20px; 
+                padding: 15px;
+                border-radius: 6px;
+                display: none;
+            }
+            .success { 
+                background: #d4edda; 
+                color: #155724;
+                border: 1px solid #c3e6cb;
+            }
+            .error { 
+                background: #f8d7da; 
+                color: #721c24;
+                border: 1px solid #f5c6cb;
+            }
         </style>
     </head>
     <body>
-        <h1>Babylon RCT License Admin</h1>
-        <p>Admin panel is working! Use the API endpoints to manage licenses.</p>
-        <div class="section">
-            <h3>Create License</h3>
-            <input type="text" id="customerName" placeholder="Customer Name">
-            <input type="email" id="customerEmail" placeholder="Customer Email">
-            <button onclick="createLicense()">Create License</button>
-            <div id="result"></div>
+        <div class="container">
+            <h1>Babylon RCT License Admin</h1>
+            
+            <div class="form-group">
+                <label for="customerName">Customer Name *</label>
+                <input type="text" id="customerName" placeholder="Enter customer name" required>
+            </div>
+            
+            <div class="form-group">
+                <label for="customerEmail">Customer Email *</label>
+                <input type="email" id="customerEmail" placeholder="Enter customer email" required>
+            </div>
+            
+            <button onclick="createLicense()" id="createBtn">Create License Key</button>
+            
+            <div id="result" class="result"></div>
         </div>
+
         <script>
+            const ADMIN_TOKEN = '${adminToken}';
+            
             async function createLicense() {
-                const result = document.getElementById('result');
+                const customerName = document.getElementById('customerName').value.trim();
+                const customerEmail = document.getElementById('customerEmail').value.trim();
+                const resultDiv = document.getElementById('result');
+                const createBtn = document.getElementById('createBtn');
+                
+                if (!customerName || !customerEmail) {
+                    showResult('Please fill in all fields', 'error');
+                    return;
+                }
+                
+                createBtn.disabled = true;
+                createBtn.textContent = 'Creating License...';
+                resultDiv.style.display = 'none';
+                
                 try {
                     const response = await fetch('/api/admin/create-license', {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
-                            'Authorization': 'Bearer ${ADMIN_TOKEN}'
+                            'Authorization': 'Bearer ' + ADMIN_TOKEN
                         },
                         body: JSON.stringify({
-                            customerName: document.getElementById('customerName').value,
-                            customerEmail: document.getElementById('customerEmail').value
+                            customerName: customerName,
+                            customerEmail: customerEmail
                         })
                     });
+                    
                     const data = await response.json();
+                    
                     if (data.success) {
-                        result.innerHTML = '<div class="success">License created: ' + data.license.licenseKey + '</div>';
+                        const licenseKey = data.license.licenseKey;
+                        showResult(
+                            '<strong>✅ License Created!</strong><br><br>' +
+                            '<strong>License Key:</strong><br>' +
+                            '<code style="background: #2c3e50; color: white; padding: 10px; border-radius: 5px; font-size: 16px; display: block; margin: 10px 0;">' + licenseKey + '</code>' +
+                            '<strong>Customer:</strong> ' + data.license.customerName + '<br>' +
+                            '<strong>Email:</strong> ' + data.license.customerEmail + '<br>' +
+                            '<strong>Expiry:</strong> ' + new Date(data.license.expiryDate).toLocaleDateString(),
+                            'success'
+                        );
+                        
+                        // Clear form
+                        document.getElementById('customerName').value = '';
+                        document.getElementById('customerEmail').value = '';
                     } else {
-                        result.innerHTML = '<div class="error">Error: ' + data.error + '</div>';
+                        showResult('Error: ' + (data.error || 'Unknown error'), 'error');
                     }
                 } catch (error) {
-                    result.innerHTML = '<div class="error">Error: ' + error.message + '</div>';
+                    showResult('Network Error: ' + error.message, 'error');
+                } finally {
+                    createBtn.disabled = false;
+                    createBtn.textContent = 'Create License Key';
                 }
+            }
+            
+            function showResult(message, type) {
+                const resultDiv = document.getElementById('result');
+                resultDiv.innerHTML = message;
+                resultDiv.className = 'result ' + type;
+                resultDiv.style.display = 'block';
             }
         </script>
     </body>
@@ -456,5 +625,5 @@ app.listen(PORT, () => {
   console.log(`🚀 Babylon RCT License Server running on port ${PORT}`);
   console.log(`📊 Admin panel: http://localhost:${PORT}/admin`);
   console.log(`❤️  Health check: http://localhost:${PORT}/api/health`);
-  console.log(`🔑 Admin Token: ${ADMIN_TOKEN.substring(0, 10)}...`);
+  console.log(`🔑 Admin Token: ${ADMIN_TOKEN ? ADMIN_TOKEN.substring(0, 10) + '...' : 'NOT SET'}`);
 });
