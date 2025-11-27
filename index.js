@@ -14,8 +14,7 @@ app.use(helmet({
     directives: {
       defaultSrc: ["'self'"],
       scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
-      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
-      fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
       imgSrc: ["'self'", "data:", "https:"],
       connectSrc: ["'self'"]
     }
@@ -482,7 +481,7 @@ app.get('/', (req, res) => {
   `);
 });
 
-// Serve admin panel - IMPROVED VERSION
+// Serve admin panel - COMPLETELY FIXED VERSION
 app.get('/admin', (req, res) => {
   const adminToken = process.env.ADMIN_TOKEN;
   
@@ -594,7 +593,7 @@ app.get('/admin', (req, res) => {
                 <input type="email" id="customerEmail" placeholder="Enter customer email" required>
             </div>
             
-            <button onclick="createLicense()" id="createBtn">Create License Key</button>
+            <button id="createBtn">Create License Key</button>
             
             <div id="result" class="result"></div>
             
@@ -606,22 +605,47 @@ app.get('/admin', (req, res) => {
         </div>
 
         <script>
+            // Admin panel JavaScript - No inline event handlers
             const ADMIN_TOKEN = '${adminToken}';
             const SERVER_URL = window.location.origin;
             
-            console.log('Admin panel loaded');
-            console.log('Server URL:', SERVER_URL);
-            console.log('Admin Token present:', !!ADMIN_TOKEN);
+            // DOM elements
+            let customerNameInput, customerEmailInput, createBtn, resultDiv, serverStatusSpan, tokenStatusSpan;
             
-            // Update debug info
-            document.getElementById('serverStatus').textContent = SERVER_URL;
-            document.getElementById('tokenStatus').textContent = ADMIN_TOKEN ? 'Present' : 'Missing';
+            // Initialize when DOM is loaded
+            document.addEventListener('DOMContentLoaded', function() {
+                console.log('Admin panel loaded');
+                console.log('Server URL:', SERVER_URL);
+                console.log('Admin Token present:', !!ADMIN_TOKEN);
+                
+                // Get DOM elements
+                customerNameInput = document.getElementById('customerName');
+                customerEmailInput = document.getElementById('customerEmail');
+                createBtn = document.getElementById('createBtn');
+                resultDiv = document.getElementById('result');
+                serverStatusSpan = document.getElementById('serverStatus');
+                tokenStatusSpan = document.getElementById('tokenStatus');
+                
+                // Update debug info
+                serverStatusSpan.textContent = SERVER_URL;
+                tokenStatusSpan.textContent = ADMIN_TOKEN ? 'Present' : 'Missing';
+                
+                // Add event listeners
+                createBtn.addEventListener('click', createLicense);
+                
+                // Allow form submission with Enter key
+                document.addEventListener('keypress', function(event) {
+                    if (event.key === 'Enter') {
+                        createLicense();
+                    }
+                });
+                
+                console.log('Event listeners attached successfully');
+            });
             
             async function createLicense() {
-                const customerName = document.getElementById('customerName').value.trim();
-                const customerEmail = document.getElementById('customerEmail').value.trim();
-                const resultDiv = document.getElementById('result');
-                const createBtn = document.getElementById('createBtn');
+                const customerName = customerNameInput.value.trim();
+                const customerEmail = customerEmailInput.value.trim();
                 
                 console.log('Creating license for:', { customerName, customerEmail });
                 
@@ -672,8 +696,8 @@ app.get('/admin', (req, res) => {
                         );
                         
                         // Clear form
-                        document.getElementById('customerName').value = '';
-                        document.getElementById('customerEmail').value = '';
+                        customerNameInput.value = '';
+                        customerEmailInput.value = '';
                     } else {
                         showResult('Error: ' + (data.error || 'Unknown error'), 'error');
                     }
@@ -687,7 +711,6 @@ app.get('/admin', (req, res) => {
             }
             
             function showResult(message, type) {
-                const resultDiv = document.getElementById('result');
                 resultDiv.innerHTML = message;
                 resultDiv.className = 'result ' + type;
                 resultDiv.style.display = 'block';
@@ -695,13 +718,6 @@ app.get('/admin', (req, res) => {
                 // Scroll to result
                 resultDiv.scrollIntoView({ behavior: 'smooth' });
             }
-            
-            // Allow form submission with Enter key
-            document.addEventListener('keypress', function(event) {
-                if (event.key === 'Enter') {
-                    createLicense();
-                }
-            });
         </script>
     </body>
     </html>
@@ -716,3 +732,4 @@ app.listen(PORT, () => {
   console.log(`🔑 Admin Token: ${ADMIN_TOKEN ? 'Set (' + ADMIN_TOKEN.substring(0, 10) + '...)' : 'NOT SET'}`);
   console.log(`🗄️  MongoDB URI: ${MONGODB_URI ? 'Set' : 'NOT SET'}`);
 });
+
