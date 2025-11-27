@@ -8,21 +8,30 @@ require('dotenv').config();
 
 const app = express();
 
-// Security Middleware
-app.use(helmet());
+// Security Middleware with adjusted CSP for admin panel
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      imgSrc: ["'self'", "data:", "https:"],
+      connectSrc: ["'self'"]
+    }
+  }
+}));
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
 // Trust proxy for Render
 app.set('trust proxy', 1);
 
-// Rate Limiting - Fixed for Render
+// Rate Limiting
 const generalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: 15 * 60 * 1000,
   max: 100,
-  keyGenerator: (req) => {
-    return req.ip; // Use IP directly to avoid proxy issues
-  }
+  keyGenerator: (req) => req.ip
 });
 app.use('/api/', generalLimiter);
 
@@ -33,10 +42,12 @@ const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
 
 if (!MONGODB_URI || !ADMIN_TOKEN) {
   console.error('❌ Missing required environment variables');
+  console.log('MONGODB_URI:', MONGODB_URI ? 'Set' : 'Missing');
+  console.log('ADMIN_TOKEN:', ADMIN_TOKEN ? 'Set' : 'Missing');
   process.exit(1);
 }
 
-// MongoDB Connection
+// MongoDB Connection with better error handling
 mongoose.connect(MONGODB_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
@@ -82,6 +93,156 @@ const usageSchema = new mongoose.Schema({
 });
 
 const Usage = mongoose.model('Usage', usageSchema);
+
+// ==================== ADMIN ENDPOINTS ====================
+
+// Authentication middleware for admin endpoints
+const authenticateAdmin = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Unauthorized - No token provided' });
+  }
+  
+  const token = authHeader.substring(7); // Remove "Bearer " prefix
+  if (token !== ADMIN_TOKEN) {
+    return res.status(401).json({ error: 'Unauthorized - Invalid token' });
+  }
+  next();
+};
+
+// Create a new license - IMPROVED VERSION
+app.post('/api/admin/create-license', authenticateAdmin, async (req, res) => {
+  try {
+    console.log('📝 Creating new license request:', req.body);
+    
+    const { customerEmail, customerName, planType, durationMonths = 12, maxActivations = 1, notes } = req.body;
+    
+    if (!customerEmail || !customerName) {
+      console.log('❌ Missing required fields');
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Customer email and name are required' 
+      });
+    }
+    
+    // Generate license key (format: BABYLON-XXXX-XXXX-XXXX)
+    const segments = [];
+    for (let i = 0; i < 3; i++) {
+      segments.push(crypto.randomBytes(2).toString('hex').toUpperCase());
+    }
+    const licenseKey = `BABYLON-${segments.join('-')}`;
+    
+    const expiryDate = new Date();
+    expiryDate.setMonth(expiryDate.getMonth() + (parseInt(durationMonths) || 12));
+    
+    console.log('🔑 Generated license key:', licenseKey);
+    
+    const license = await License.create({
+      licenseKey,
+      customerEmail: customerEmail.trim(),
+      customerName: customerName.trim(),
+      expiryDate,
+      maxActivations: parseInt(maxActivations) || 1,
+      metadata: { 
+        planType: planType || 'single',
+        notes: notes || ''
+      }
+    });
+    
+    console.log(`✅ New license created: ${licenseKey} for ${customerEmail}`);
+    
+    res.json({ 
+      success: true, 
+      license: {
+        licenseKey: license.licenseKey,
+        customerName: license.customerName,
+        customerEmail: license.customerEmail,
+        expiryDate: license.expiryDate,
+        maxActivations: license.maxActivations,
+        planType: license.metadata.planType
+      }
+    });
+    
+  } catch (error) {
+    console.error('💥 License creation error:', error);
+    
+    if (error.code === 11000) {
+      // Duplicate key error (shouldn't happen with random keys, but just in case)
+      return res.status(400).json({ 
+        success: false, 
+        error: 'License key already exists. Please try again.' 
+      });
+    }
+    
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// Get all licenses
+app.get('/api/admin/licenses', authenticateAdmin, async (req, res) => {
+  try {
+    const licenses = await License.find().sort({ createdAt: -1 });
+    res.json(licenses);
+  } catch (error) {
+    console.error('💥 Error fetching licenses:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get usage statistics
+app.get('/api/admin/usage-stats', authenticateAdmin, async (req, res) => {
+  try {
+    const stats = await Usage.aggregate([
+      {
+        $group: {
+          _id: '$licenseKey',
+          totalActions: { $sum: 1 },
+          lastActivity: { $max: '$timestamp' },
+          uniqueDevices: { $addToSet: '$deviceId' },
+          actions: { $push: { action: '$action', timestamp: '$timestamp' } }
+        }
+      },
+      {
+        $lookup: {
+          from: 'licenses',
+          localField: '_id',
+          foreignField: 'licenseKey',
+          as: 'licenseInfo'
+        }
+      }
+    ]);
+    
+    res.json(stats);
+  } catch (error) {
+    console.error('💥 Error fetching usage stats:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Deactivate license
+app.post('/api/admin/deactivate-license', authenticateAdmin, async (req, res) => {
+  try {
+    const { licenseKey } = req.body;
+    
+    const license = await License.findOneAndUpdate(
+      { licenseKey },
+      { isActive: false },
+      { new: true }
+    );
+    
+    if (!license) {
+      return res.status(404).json({ error: 'License not found' });
+    }
+    
+    res.json({ success: true, message: 'License deactivated' });
+  } catch (error) {
+    console.error('💥 Error deactivating license:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // ==================== LICENSE VALIDATION ENDPOINTS ====================
 
@@ -248,128 +409,6 @@ app.post('/api/record-usage', async (req, res) => {
   }
 });
 
-// ==================== ADMIN ENDPOINTS ====================
-
-// Authentication middleware for admin endpoints
-const authenticateAdmin = (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || authHeader !== `Bearer ${ADMIN_TOKEN}`) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-  next();
-};
-
-// Get all licenses
-app.get('/api/admin/licenses', authenticateAdmin, async (req, res) => {
-  try {
-    const licenses = await License.find().sort({ createdAt: -1 });
-    res.json(licenses);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Get usage statistics
-app.get('/api/admin/usage-stats', authenticateAdmin, async (req, res) => {
-  try {
-    const stats = await Usage.aggregate([
-      {
-        $group: {
-          _id: '$licenseKey',
-          totalActions: { $sum: 1 },
-          lastActivity: { $max: '$timestamp' },
-          uniqueDevices: { $addToSet: '$deviceId' },
-          actions: { $push: { action: '$action', timestamp: '$timestamp' } }
-        }
-      },
-      {
-        $lookup: {
-          from: 'licenses',
-          localField: '_id',
-          foreignField: 'licenseKey',
-          as: 'licenseInfo'
-        }
-      }
-    ]);
-    
-    res.json(stats);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Create a new license
-app.post('/api/admin/create-license', authenticateAdmin, async (req, res) => {
-  try {
-    const { customerEmail, customerName, planType, durationMonths = 12, maxActivations = 1, notes } = req.body;
-    
-    if (!customerEmail || !customerName) {
-      return res.status(400).json({ error: 'Customer email and name are required' });
-    }
-    
-    // Generate license key (format: BABYLON-XXXX-XXXX-XXXX)
-    const segments = [];
-    for (let i = 0; i < 3; i++) {
-      segments.push(crypto.randomBytes(2).toString('hex').toUpperCase());
-    }
-    const licenseKey = `BABYLON-${segments.join('-')}`;
-    
-    const expiryDate = new Date();
-    expiryDate.setMonth(expiryDate.getMonth() + durationMonths);
-    
-    const license = await License.create({
-      licenseKey,
-      customerEmail,
-      customerName,
-      expiryDate,
-      maxActivations,
-      metadata: { 
-        planType: planType || 'single',
-        notes: notes || ''
-      }
-    });
-    
-    console.log(`✅ New license created: ${licenseKey} for ${customerEmail}`);
-    
-    res.json({ 
-      success: true, 
-      license: {
-        licenseKey: license.licenseKey,
-        customerName: license.customerName,
-        customerEmail: license.customerEmail,
-        expiryDate: license.expiryDate,
-        maxActivations: license.maxActivations,
-        planType: license.metadata.planType
-      }
-    });
-    
-  } catch (error) {
-    console.error('💥 License creation error:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Deactivate license
-app.post('/api/admin/deactivate-license', authenticateAdmin, async (req, res) => {
-  try {
-    const { licenseKey } = req.body;
-    
-    const license = await License.findOneAndUpdate(
-      { licenseKey },
-      { isActive: false },
-      { new: true }
-    );
-    
-    if (!license) {
-      return res.status(404).json({ error: 'License not found' });
-    }
-    
-    res.json({ success: true, message: 'License deactivated' });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // Health check endpoint
 app.get('/api/health', async (req, res) => {
   try {
@@ -443,7 +482,7 @@ app.get('/', (req, res) => {
   `);
 });
 
-// Serve admin panel
+// Serve admin panel - IMPROVED VERSION
 app.get('/admin', (req, res) => {
   const adminToken = process.env.ADMIN_TOKEN;
   
@@ -452,6 +491,8 @@ app.get('/admin', (req, res) => {
     <html>
     <head>
         <title>Babylon RCT - License Admin</title>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
             body { 
                 font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
@@ -504,6 +545,7 @@ app.get('/admin', (req, res) => {
                 font-size: 16px;
                 font-weight: 600;
                 width: 100%;
+                transition: background 0.3s;
             }
             button:hover { 
                 background: #2980b9;
@@ -528,6 +570,14 @@ app.get('/admin', (req, res) => {
                 color: #721c24;
                 border: 1px solid #f5c6cb;
             }
+            .debug-info {
+                margin-top: 20px;
+                padding: 10px;
+                background: #f8f9fa;
+                border-radius: 5px;
+                font-size: 12px;
+                color: #666;
+            }
         </style>
     </head>
     <body>
@@ -547,10 +597,25 @@ app.get('/admin', (req, res) => {
             <button onclick="createLicense()" id="createBtn">Create License Key</button>
             
             <div id="result" class="result"></div>
+            
+            <div class="debug-info">
+                <strong>Debug Info:</strong><br>
+                Server: <span id="serverStatus">Checking...</span><br>
+                Admin Token: <span id="tokenStatus">Checking...</span>
+            </div>
         </div>
 
         <script>
             const ADMIN_TOKEN = '${adminToken}';
+            const SERVER_URL = window.location.origin;
+            
+            console.log('Admin panel loaded');
+            console.log('Server URL:', SERVER_URL);
+            console.log('Admin Token present:', !!ADMIN_TOKEN);
+            
+            // Update debug info
+            document.getElementById('serverStatus').textContent = SERVER_URL;
+            document.getElementById('tokenStatus').textContent = ADMIN_TOKEN ? 'Present' : 'Missing';
             
             async function createLicense() {
                 const customerName = document.getElementById('customerName').value.trim();
@@ -558,8 +623,15 @@ app.get('/admin', (req, res) => {
                 const resultDiv = document.getElementById('result');
                 const createBtn = document.getElementById('createBtn');
                 
+                console.log('Creating license for:', { customerName, customerEmail });
+                
                 if (!customerName || !customerEmail) {
                     showResult('Please fill in all fields', 'error');
+                    return;
+                }
+                
+                if (!ADMIN_TOKEN) {
+                    showResult('Admin token not configured on server', 'error');
                     return;
                 }
                 
@@ -568,7 +640,9 @@ app.get('/admin', (req, res) => {
                 resultDiv.style.display = 'none';
                 
                 try {
-                    const response = await fetch('/api/admin/create-license', {
+                    console.log('Sending request to:', SERVER_URL + '/api/admin/create-license');
+                    
+                    const response = await fetch(SERVER_URL + '/api/admin/create-license', {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
@@ -580,7 +654,10 @@ app.get('/admin', (req, res) => {
                         })
                     });
                     
+                    console.log('Response status:', response.status);
+                    
                     const data = await response.json();
+                    console.log('Response data:', data);
                     
                     if (data.success) {
                         const licenseKey = data.license.licenseKey;
@@ -601,6 +678,7 @@ app.get('/admin', (req, res) => {
                         showResult('Error: ' + (data.error || 'Unknown error'), 'error');
                     }
                 } catch (error) {
+                    console.error('Network error:', error);
                     showResult('Network Error: ' + error.message, 'error');
                 } finally {
                     createBtn.disabled = false;
@@ -613,7 +691,17 @@ app.get('/admin', (req, res) => {
                 resultDiv.innerHTML = message;
                 resultDiv.className = 'result ' + type;
                 resultDiv.style.display = 'block';
+                
+                // Scroll to result
+                resultDiv.scrollIntoView({ behavior: 'smooth' });
             }
+            
+            // Allow form submission with Enter key
+            document.addEventListener('keypress', function(event) {
+                if (event.key === 'Enter') {
+                    createLicense();
+                }
+            });
         </script>
     </body>
     </html>
@@ -625,5 +713,6 @@ app.listen(PORT, () => {
   console.log(`🚀 Babylon RCT License Server running on port ${PORT}`);
   console.log(`📊 Admin panel: http://localhost:${PORT}/admin`);
   console.log(`❤️  Health check: http://localhost:${PORT}/api/health`);
-  console.log(`🔑 Admin Token: ${ADMIN_TOKEN ? ADMIN_TOKEN.substring(0, 10) + '...' : 'NOT SET'}`);
+  console.log(`🔑 Admin Token: ${ADMIN_TOKEN ? 'Set (' + ADMIN_TOKEN.substring(0, 10) + '...)' : 'NOT SET'}`);
+  console.log(`🗄️  MongoDB URI: ${MONGODB_URI ? 'Set' : 'NOT SET'}`);
 });
