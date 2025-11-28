@@ -82,17 +82,6 @@ const licenseSchema = new mongoose.Schema({
 
 const License = mongoose.model('License', licenseSchema);
 
-// Usage Analytics Schema
-const usageSchema = new mongoose.Schema({
-  licenseKey: String,
-  deviceId: String,
-  action: String,
-  metadata: Object,
-  timestamp: { type: Date, default: Date.now }
-});
-
-const Usage = mongoose.model('Usage', usageSchema);
-
 // ==================== ADMIN ENDPOINTS ====================
 
 // Authentication middleware for admin endpoints
@@ -109,7 +98,7 @@ const authenticateAdmin = (req, res, next) => {
   next();
 };
 
-// Create a new license - IMPROVED VERSION
+// Create a new license
 app.post('/api/admin/create-license', authenticateAdmin, async (req, res) => {
   try {
     console.log('📝 Creating new license request:', req.body);
@@ -166,7 +155,6 @@ app.post('/api/admin/create-license', authenticateAdmin, async (req, res) => {
     console.error('💥 License creation error:', error);
     
     if (error.code === 11000) {
-      // Duplicate key error (shouldn't happen with random keys, but just in case)
       return res.status(400).json({ 
         success: false, 
         error: 'License key already exists. Please try again.' 
@@ -187,36 +175,6 @@ app.get('/api/admin/licenses', authenticateAdmin, async (req, res) => {
     res.json(licenses);
   } catch (error) {
     console.error('💥 Error fetching licenses:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Get usage statistics
-app.get('/api/admin/usage-stats', authenticateAdmin, async (req, res) => {
-  try {
-    const stats = await Usage.aggregate([
-      {
-        $group: {
-          _id: '$licenseKey',
-          totalActions: { $sum: 1 },
-          lastActivity: { $max: '$timestamp' },
-          uniqueDevices: { $addToSet: '$deviceId' },
-          actions: { $push: { action: '$action', timestamp: '$timestamp' } }
-        }
-      },
-      {
-        $lookup: {
-          from: 'licenses',
-          localField: '_id',
-          foreignField: 'licenseKey',
-          as: 'licenseInfo'
-        }
-      }
-    ]);
-    
-    res.json(stats);
-  } catch (error) {
-    console.error('💥 Error fetching usage stats:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -386,28 +344,6 @@ app.post('/api/activate-license', async (req, res) => {
   }
 });
 
-// Record usage endpoint
-app.post('/api/record-usage', async (req, res) => {
-  try {
-    const { license_key, device_id, action, metadata } = req.body;
-    
-    await Usage.create({
-      licenseKey: license_key,
-      deviceId: device_id,
-      action: action,
-      metadata: metadata || {}
-    });
-    
-    console.log(`📊 Usage recorded: ${action} for license: ${license_key}`);
-    
-    res.json({ success: true });
-    
-  } catch (error) {
-    console.error('💥 Usage recording error:', error);
-    res.json({ success: false });
-  }
-});
-
 // Health check endpoint
 app.get('/api/health', async (req, res) => {
   try {
@@ -475,13 +411,14 @@ app.get('/', (req, res) => {
             <p><strong>Status:</strong> ✅ Live</p>
             <p><strong>URL:</strong> https://babylon-license-server-zivj.onrender.com</p>
             <p><strong>Database:</strong> MongoDB Atlas</p>
+            <p><strong>Features:</strong> License validation & activation only (Usage tracking removed)</p>
         </div>
     </body>
     </html>
   `);
 });
 
-// Serve admin panel - COMPLETELY FIXED VERSION
+// Serve admin panel
 app.get('/admin', (req, res) => {
   const adminToken = process.env.ADMIN_TOKEN;
   
@@ -731,5 +668,5 @@ app.listen(PORT, () => {
   console.log(`❤️  Health check: http://localhost:${PORT}/api/health`);
   console.log(`🔑 Admin Token: ${ADMIN_TOKEN ? 'Set (' + ADMIN_TOKEN.substring(0, 10) + '...)' : 'NOT SET'}`);
   console.log(`🗄️  MongoDB URI: ${MONGODB_URI ? 'Set' : 'NOT SET'}`);
+  console.log(`📈 Usage tracking: REMOVED - Server now handles only license validation and activation`);
 });
-
